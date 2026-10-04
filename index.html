@@ -19,7 +19,7 @@ small{color:#9ca3af}
   <h2>Exam Camera</h2>
   <video id="video" autoplay playsinline muted></video>
   <div id="status">Starting...</div>
-  <small>Keep your face visible and keep this window open.</small>
+  <small>Keep your face visible and keep this window open. Detection uses persistent multi-frame confirmation.</small>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
@@ -34,9 +34,13 @@ const backend = params.get('backend');
 const video = document.getElementById('video');
 const statusEl = document.getElementById('status');
 
-const NO_FACE_MS = 2500;
-const MULTI_FACE_MS = 1500;
+const NO_FACE_MS = 2000;
+const MULTI_FACE_MS = 2000;
 const COOLDOWN_MS = 10000;
+
+// Maximum recorded violations in any rolling 60-second window.
+const MAX_VIOLATIONS_PER_MINUTE = 5;
+const VIOLATION_WINDOW_MS = 60000;
 
 const REQUIRED_FACE_FRAMES = 5;
 const REQUIRED_NO_FACE_FRAMES = 5;
@@ -45,21 +49,23 @@ const MIN_FACE_PROBABILITY = 0.70;
 
 // Lightweight advanced detections derived from BlazeFace keypoints.
 // These are head/mouth-motion heuristics, not full iris/gaze or speech models.
-const LOOK_AWAY_MS = 1800;
-const REQUIRED_LOOK_AWAY_FRAMES = 4;
+const LOOK_AWAY_MS = 2000;
+const REQUIRED_LOOK_AWAY_FRAMES = 5;
+const LOOK_AWAY_RESET_FRAMES = 5;
 const HEAD_YAW_THRESHOLD = 0.22;
 const HEAD_PITCH_THRESHOLD = 0.32;
 
 // Mouth movement is estimated from the BlazeFace mouth keypoint moving
 // relative to the eyes. It detects visible mouth motion, not speech itself.
-const MOUTH_MS = 1800;
-const REQUIRED_MOUTH_FRAMES = 5;
+const MOUTH_MS = 2000;
+const REQUIRED_MOUTH_FRAMES = 6;
+const MOUTH_RESET_FRAMES = 5;
 const MOUTH_MOVEMENT_THRESHOLD = 0.035;
 
 // Phone detection is deliberately throttled so COCO-SSD is not run on every
 // 250 ms face-detection cycle.
 const PHONE_SCORE_THRESHOLD = 0.55;
-const PHONE_MS = 1200;
+const PHONE_MS = 2000;
 const REQUIRED_PHONE_FRAMES = 2;
 const PHONE_CHECK_INTERVAL_MS = 3000;
 
@@ -79,14 +85,19 @@ let noFaceFrames = 0;
 let multiFaceFrames = 0;
 let lookAwaySince = 0;
 let lookAwayFrames = 0;
+let lookAwayGoodFrames = 0;
 let phoneSince = 0;
 let phoneFrames = 0;
 let mouthSince = 0;
 let mouthFrames = 0;
+let mouthGoodFrames = 0;
 let mouthHistory = [];
 
 let lastUpload = 0;
 let uploading = false;
+
+// Timestamps of successfully recorded violations.
+let violationTimestamps = [];
 
 function status(t, bad=false) {
   statusEl.textContent = t;
@@ -242,7 +253,10 @@ function evaluateAdvancedDetections(face, now) {
     pitch > HEAD_PITCH_THRESHOLD;
 
   if (lookingAway) {
+    // Require several consecutive confirming frames.
     lookAwayFrames++;
+    lookAwayGoodFrames = 0;
+
     if (!lookAwaySince) lookAwaySince = now;
 
     if (
@@ -250,12 +264,23 @@ function evaluateAdvancedDetections(face, now) {
       now - lookAwaySince >= LOOK_AWAY_MS
     ) {
       violation('LOOKING_AWAY');
+
+      // Do not immediately forget the state. This prevents one borderline
+      // frame from causing the detector to start over.
       lookAwayFrames = 0;
-      lookAwaySince = 0;
+      lookAwaySince = now;
+      lookAwayGoodFrames = 0;
     }
   } else {
-    lookAwayFrames = 0;
-    lookAwaySince = 0;
+    // Like NO_FACE/MULTIPLE_FACES, tolerate a few good frames before
+    // declaring that the looking-away condition has actually cleared.
+    lookAwayGoodFrames++;
+
+    if (lookAwayGoodFrames >= LOOK_AWAY_RESET_FRAMES) {
+      lookAwayFrames = 0;
+      lookAwaySince = 0;
+      lookAwayGoodFrames = 0;
+    }
   }
 
   // BlazeFace has only one mouth keypoint, so this is intentionally a
@@ -279,6 +304,8 @@ function evaluateAdvancedDetections(face, now) {
 
   if (mouthMoving) {
     mouthFrames++;
+    mouthGoodFrames = 0;
+
     if (!mouthSince) mouthSince = now;
 
     if (
@@ -286,13 +313,26 @@ function evaluateAdvancedDetections(face, now) {
       now - mouthSince >= MOUTH_MS
     ) {
       violation('MOUTH_MOVEMENT');
+
+      // Keep the detector latched briefly so a single quiet frame doesn't
+      // reset the detection immediately.
       mouthFrames = 0;
-      mouthSince = 0;
+      mouthSince = now;
+      mouthGoodFrames = 0;
       mouthHistory = [];
     }
   } else {
-    mouthFrames = 0;
-    mouthSince = 0;
+    // Require several consecutive non-moving frames before clearing the
+    // mouth-movement state.
+    mouthGoodFrames++;
+
+    if (mouthGoodFrames >= MOUTH_RESET_FRAMES) {
+      mouthFrames = 0;
+      mouthSince = 0;
+      mouthGoodFrames = 0;
+      // Keep a short history so normal frame-to-frame noise doesn't erase
+      // the movement signal instantly.
+    }
   }
 }
 
@@ -348,6 +388,13 @@ async function detectPhone(now) {
   }
 }
 
+function canRecordViolation(now) {
+  violationTimestamps = violationTimestamps.filter(
+    t => now - t < VIOLATION_WINDOW_MS
+  );
+  return violationTimestamps.length < MAX_VIOLATIONS_PER_MINUTE;
+}
+
 async function violation(type) {
   const now=Date.now();
 
@@ -369,7 +416,8 @@ async function violation(type) {
       console.error('Violation upload failed:',result.error);
       postStatus('ERROR','Violation upload failed: '+result.error);
     } else {
-      status('Violation recorded: '+type,true);
+      violationTimestamps.push(now);
+        status('Violation recorded: '+type,true);
     }
 
   } catch(e) {
