@@ -36,7 +36,7 @@ const statusEl = document.getElementById('status');
 
 const NO_FACE_MS = 2000;
 const MULTI_FACE_MS = 2000;
-const COOLDOWN_MS = 10000;
+const COOLDOWN_MS = 15000;
 
 // Maximum recorded violations in any rolling 60-second window.
 const MAX_VIOLATIONS_PER_MINUTE = 5;
@@ -49,11 +49,11 @@ const MIN_FACE_PROBABILITY = 0.70;
 
 // Lightweight advanced detections derived from BlazeFace keypoints.
 // These are head/mouth-motion heuristics, not full iris/gaze or speech models.
-const LOOK_AWAY_MS = 2000;
-const REQUIRED_LOOK_AWAY_FRAMES = 5;
+const LOOK_AWAY_MS = 3000;
+const REQUIRED_LOOK_AWAY_FRAMES = 8;
 const LOOK_AWAY_RESET_FRAMES = 5;
-const HEAD_YAW_THRESHOLD = 0.22;
-const HEAD_PITCH_THRESHOLD = 0.32;
+const HEAD_YAW_THRESHOLD = 0.30;
+const HEAD_PITCH_THRESHOLD = 0.38;
 
 // Mouth movement is estimated from the BlazeFace mouth keypoint moving
 // relative to the eyes. It detects visible mouth motion, not speech itself.
@@ -98,6 +98,7 @@ let uploading = false;
 
 // Timestamps of successfully recorded violations.
 let violationTimestamps = [];
+let violationUploadInProgress = false;
 
 function status(t, bad=false) {
   statusEl.textContent = t;
@@ -396,39 +397,53 @@ function canRecordViolation(now) {
 }
 
 async function violation(type) {
-  const now=Date.now();
+    const now = Date.now();
 
-  if (uploading || now-lastUpload<COOLDOWN_MS) {
-    return;
-  }
+    // Hard guard: only one violation upload may be active at a time.
+    if (violationUploadInProgress) return;
 
-  lastUpload=now;
-  uploading=true;
+    // Enforce a minimum gap between recorded violations.
+    if (now - lastUpload < COOLDOWN_MS) return;
 
-  status('Violation detected: '+type,true);
-
-  try {
-    const image=capture();
-    const result=await upload(type,image);
-
-    if (result && result.ok === false) {
-      status('Violation upload failed',true);
-      console.error('Violation upload failed:',result.error);
-      postStatus('ERROR','Violation upload failed: '+result.error);
-    } else {
-      violationTimestamps.push(now);
-        status('Violation recorded: '+type,true);
+    // Rolling one-minute maximum.
+    violationTimestamps = violationTimestamps.filter(
+      t => now - t < VIOLATION_WINDOW_MS
+    );
+    if (violationTimestamps.length >= MAX_VIOLATIONS_PER_MINUTE) {
+      status(
+        'Violation limit reached: maximum 5 recorded violations in the last minute.',
+        true
+      );
+      return;
     }
 
-  } catch(e) {
-    console.error('Violation upload error:',e);
-    status('Violation upload failed',true);
-    postStatus('ERROR','Violation upload failed: '+e.message);
+    // Reserve the slot immediately so another detector cannot race in
+    // before this upload completes.
+    violationUploadInProgress = true;
+    lastUpload = now;
+    violationTimestamps.push(now);
 
-  } finally {
-    uploading=false;
+    status('Violation detected: ' + type, true);
+
+    try {
+      const image = capture();
+      const result = await upload(type, image);
+
+      if (result && result.ok === false) {
+        // Upload failed, so release the reserved one-minute slot.
+        violationTimestamps = violationTimestamps.filter(t => t !== now);
+        status('Upload failed: ' + (result.error || 'unknown error'), true);
+      } else {
+        status('Violation recorded: ' + type, true);
+      }
+    } catch (e) {
+      // Upload failed, so release the reserved one-minute slot.
+      violationTimestamps = violationTimestamps.filter(t => t !== now);
+      status('Upload error: ' + (e.message || e), true);
+    } finally {
+      violationUploadInProgress = false;
+    }
   }
-}
 
 function capture() {
   const c=document.createElement('canvas');
