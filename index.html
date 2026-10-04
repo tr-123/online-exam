@@ -8,7 +8,9 @@
 body{margin:0;background:#111827;color:#fff;font-family:system-ui;text-align:center}
 .wrap{padding:16px}
 video{width:min(100%,480px);background:#000;border:3px solid #10b981;border-radius:12px;transform:scaleX(-1)}
-#status{margin:12px;font-weight:700}.ok{color:#34d399}.bad{color:#f87171}
+#status{margin:12px;font-weight:700}
+.ok{color:#34d399}
+.bad{color:#f87171}
 small{color:#9ca3af}
 </style>
 </head>
@@ -24,43 +26,43 @@ small{color:#9ca3af}
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface@0.0.7/dist/blazeface.min.js"></script>
 
 <script>
-const params=new URLSearchParams(location.search);
-const token=params.get('token');
-const backend=params.get('backend');
+const params = new URLSearchParams(location.search);
+const token = params.get('token');
+const backend = params.get('backend');
 
-const video=document.getElementById('video');
-const statusEl=document.getElementById('status');
+const video = document.getElementById('video');
+const statusEl = document.getElementById('status');
 
-const NO_FACE_MS=2500;
-const MULTI_FACE_MS=1500;
-const COOLDOWN_MS=10000;
+const NO_FACE_MS = 2500;
+const MULTI_FACE_MS = 1500;
+const COOLDOWN_MS = 10000;
 
-// Require several consecutive detections before accepting a face.
-// This prevents a single false BlazeFace detection from immediately
-// changing "no face" into "Face detected".
-const REQUIRED_FACE_FRAMES=5;
-const REQUIRED_NO_FACE_FRAMES=5;
-const REQUIRED_MULTI_FACE_FRAMES=4;
-const MIN_FACE_PROBABILITY=0.70;
+const REQUIRED_FACE_FRAMES = 5;
+const REQUIRED_NO_FACE_FRAMES = 5;
+const REQUIRED_MULTI_FACE_FRAMES = 4;
+const MIN_FACE_PROBABILITY = 0.70;
 
-let model=null;
-let stream=null;
-let running=true;
-let noFaceSince=0;
-let multiSince=0;
-let lastUpload=0;
-let faceFrames=0;
-let noFaceFrames=0;
-let multiFaceFrames=0;
-let uploading=false;
+let model = null;
+let stream = null;
+let running = true;
 
-function status(text,bad=false){
-  statusEl.textContent=text;
-  statusEl.className=bad?'bad':'ok';
+let noFaceSince = 0;
+let multiSince = 0;
+
+let faceFrames = 0;
+let noFaceFrames = 0;
+let multiFaceFrames = 0;
+
+let lastUpload = 0;
+let uploading = false;
+
+function status(t, bad=false) {
+  statusEl.textContent = t;
+  statusEl.className = bad ? 'bad' : 'ok';
 }
 
-function postStatus(s,msg=''){
-  if(window.opener){
+function postStatus(s,msg='') {
+  if (window.opener) {
     window.opener.postMessage({
       type:'EXAM_CAMERA_STATUS',
       status:s,
@@ -70,150 +72,156 @@ function postStatus(s,msg=''){
   }
 }
 
-function getReliableFaces(faces){
-  return faces.filter(face=>{
-    // BlazeFace normally exposes probability as an array.
-    // If unavailable, keep the detection rather than rejecting it.
-    const p=Array.isArray(face.probability)
+function getReliableFaces(faces) {
+  return faces.filter(face => {
+    const p = Array.isArray(face.probability)
       ? Number(face.probability[0])
       : Number(face.probability);
 
-    return !Number.isFinite(p) || p>=MIN_FACE_PROBABILITY;
+    return !Number.isFinite(p) || p >= MIN_FACE_PROBABILITY;
   });
 }
 
-async function start(){
-  if(!token||!backend){
+async function start() {
+  if (!token || !backend) {
     status('Invalid camera session.',true);
     postStatus('ERROR','Invalid camera session');
     return;
   }
 
-  try{
-    stream=await navigator.mediaDevices.getUserMedia({
-      video:{facingMode:'user'},
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video:true,
       audio:false
     });
 
-    video.srcObject=stream;
+    video.srcObject = stream;
     await video.play();
 
     status('Loading face detector...');
-    model=await blazeface.load();
+    model = await blazeface.load();
 
     status('Camera monitoring ACTIVE');
     postStatus('READY');
+
     monitor();
-  }catch(e){
+
+  } catch(e) {
     console.error(e);
     status('Camera error: '+e.name,true);
     postStatus('ERROR',e.name+': '+e.message);
   }
 }
 
-async function monitor(){
-  while(running){
-    try{
-      if(video.readyState>=2 && model && !uploading){
-        const faces=await model.estimateFaces(video,false);
-        const reliableFaces=getReliableFaces(faces);
-        const count=reliableFaces.length;
-        const now=Date.now();
+async function monitor() {
+  while (running) {
+    if (video.readyState >= 2 && model) {
+      try {
+        const faces = await model.estimateFaces(video,false);
+        const reliableFaces = getReliableFaces(faces);
+        const count = reliableFaces.length;
+        const now = Date.now();
 
-        if(count===0){
+        if (count === 0) {
           noFaceFrames++;
           faceFrames=0;
           multiFaceFrames=0;
           multiSince=0;
 
-          if(noFaceFrames>=REQUIRED_NO_FACE_FRAMES){
-            if(!noFaceSince) noFaceSince=now;
-            status('No face detected',true);
+          if (!noFaceSince) noFaceSince=now;
 
-            if(now-noFaceSince>=NO_FACE_MS){
-              await violation('NO_FACE');
-              noFaceSince=0;
-              noFaceFrames=0;
-            }
+          if (
+            noFaceFrames >= REQUIRED_NO_FACE_FRAMES &&
+            now-noFaceSince >= NO_FACE_MS
+          ) {
+            await violation('NO_FACE');
+            noFaceSince=0;
+            noFaceFrames=0;
           }
-        }
-        else if(count>1){
+
+          status('Face not detected...',true);
+
+        } else if (count > 1) {
           multiFaceFrames++;
           faceFrames=0;
           noFaceFrames=0;
           noFaceSince=0;
 
-          if(multiFaceFrames>=REQUIRED_MULTI_FACE_FRAMES){
-            if(!multiSince) multiSince=now;
-            status('Multiple faces detected',true);
+          if (!multiSince) multiSince=now;
 
-            if(now-multiSince>=MULTI_FACE_MS){
-              await violation('MULTIPLE_FACES');
-              multiSince=0;
-              multiFaceFrames=0;
-            }
+          if (
+            multiFaceFrames >= REQUIRED_MULTI_FACE_FRAMES &&
+            now-multiSince >= MULTI_FACE_MS
+          ) {
+            await violation('MULTIPLE_FACES');
+            multiSince=0;
+            multiFaceFrames=0;
           }
-        }
-        else{
+
+          status('Multiple faces detected',true);
+
+        } else {
           faceFrames++;
           noFaceFrames=0;
           multiFaceFrames=0;
+          noFaceSince=0;
           multiSince=0;
 
-          // Do not immediately cancel a pending no-face violation
-          // because of one possible false positive.
-          if(faceFrames>=REQUIRED_FACE_FRAMES){
-            noFaceSince=0;
+          if (faceFrames >= REQUIRED_FACE_FRAMES) {
             status('Face detected');
-          }else{
-            status('Checking face...');
           }
         }
+
+      } catch(e) {
+        console.error('Face detection error:',e);
       }
-    }catch(e){
-      console.error('Face detection error:',e);
-      status('Face detection error',true);
     }
 
-    await new Promise(resolve=>setTimeout(resolve,250));
+    await new Promise(r=>setTimeout(r,250));
   }
 }
 
-async function violation(type){
+async function violation(type) {
   const now=Date.now();
 
-  if(uploading || now-lastUpload<COOLDOWN_MS) return;
+  if (uploading || now-lastUpload<COOLDOWN_MS) {
+    return;
+  }
 
   lastUpload=now;
   uploading=true;
+
   status('Violation detected: '+type,true);
 
-  try{
+  try {
     const image=capture();
     const result=await upload(type,image);
 
-    if(result && result.ok===false){
+    if (result && result.ok === false) {
       status('Violation upload failed',true);
-      console.error('Violation upload failed:',result.error||result.message);
-      postStatus('ERROR','Violation upload failed: '+(result.error||result.message||'Unknown error'));
-    }else{
+      console.error('Violation upload failed:',result.error);
+      postStatus('ERROR','Violation upload failed: '+result.error);
+    } else {
       status('Violation recorded: '+type,true);
     }
-  }catch(e){
-    console.error('Violation upload exception:',e);
+
+  } catch(e) {
+    console.error('Violation upload error:',e);
     status('Violation upload failed',true);
-  }finally{
+    postStatus('ERROR','Violation upload failed: '+e.message);
+
+  } finally {
     uploading=false;
   }
 }
 
-function capture(){
+function capture() {
   const c=document.createElement('canvas');
   const maxW=640;
   const s=Math.min(1,maxW/video.videoWidth);
 
-  c.width=Math.max(1,Math.round(video.videoWidth*s));
-  c.height=Math.max(1,Math.round(video.videoHeight*s));
+  c.width=Math.round(video.videoWidth*s);
+  c.height=Math.round(video.videoHeight*s);
 
   const ctx=c.getContext('2d');
   ctx.drawImage(video,0,0,c.width,c.height);
@@ -221,83 +229,77 @@ function capture(){
   return c.toDataURL('image/jpeg',0.72);
 }
 
-function upload(type,image){
-  return new Promise((resolve,reject)=>{
+/*
+ * Apps Script web apps do not reliably expose their response to a
+ * cross-origin hidden iframe. Therefore this function confirms that the
+ * browser submitted the POST, but cannot always confirm the server result.
+ *
+ * Actual success/failure is visible in Apps Script Executions.
+ */
+function upload(type,image) {
+  return new Promise(resolve => {
     const frameName='cameraUploadTarget_'+Date.now();
-    const frame=document.createElement('iframe');
 
+    const f=document.createElement('form');
+    f.method='POST';
+    f.action=backend;
+    f.target=frameName;
+    f.enctype='application/x-www-form-urlencoded';
+
+    const frame=document.createElement('iframe');
     frame.name=frameName;
     frame.style.display='none';
+
     document.body.appendChild(frame);
 
-    const form=document.createElement('form');
-    form.method='POST';
-    form.action=backend;
-    form.target=frameName;
-    form.style.display='none';
-
-    [['token',token],['violation',type],['image',image]].forEach(([name,value])=>{
-      const input=document.createElement('input');
-      input.type='hidden';
-      input.name=name;
-      input.value=value;
-      form.appendChild(input);
+    [
+      ['token',token],
+      ['violation',type],
+      ['image',image]
+    ].forEach(([n,v]) => {
+      const i=document.createElement('input');
+      i.type='hidden';
+      i.name=n;
+      i.value=v;
+      f.appendChild(i);
     });
 
-    document.body.appendChild(form);
+    document.body.appendChild(f);
 
-    let settled=false;
+    let finished=false;
 
-    const finish=(result)=>{
-      if(settled)return;
-      settled=true;
-
-      clearTimeout(timeout);
-      form.remove();
+    const finish=result => {
+      if(finished)return;
+      finished=true;
+      clearTimeout(timer);
+      f.remove();
       frame.remove();
       resolve(result);
     };
 
-    // The response is loaded into the hidden iframe. Apps Script returns JSON.
-    frame.addEventListener('load',()=>{
-      try{
-        const doc=frame.contentDocument;
-        const text=(doc && doc.body) ? doc.body.innerText.trim() : '';
-
-        if(text){
-          finish(JSON.parse(text));
-        }
-      }catch(e){
-        // Cross-origin response may prevent reading the iframe.
-        // In that case the request may still have succeeded.
-        console.warn('Could not read upload response:',e);
-      }
-    });
-
-    const timeout=setTimeout(()=>{
-      // Do not report success merely because a timer elapsed.
-      // The server endpoint is expected to process the request independently.
-      finish({ok:true,assumed:true});
+    const timer=setTimeout(() => {
+      finish({ok:true,submitted:true});
     },5000);
 
-    try{
-      form.submit();
-    }catch(e){
-      clearTimeout(timeout);
-      form.remove();
-      frame.remove();
-      reject(e);
+    try {
+      f.submit();
+    } catch(e) {
+      finish({ok:false,error:e.message});
     }
   });
 }
 
-window.addEventListener('message',e=>{
-  if(!e.data || e.data.type!=='EXAM_COMMAND' || e.data.token!==token) return;
+window.addEventListener('message',e => {
+  if (
+    !e.data ||
+    e.data.type!=='EXAM_COMMAND' ||
+    e.data.token!==token
+  ) return;
 
-  if(e.data.command==='STOP'){
+  if(e.data.command==='STOP') {
     running=false;
 
-    if(stream){
+    if(stream) {
       stream.getTracks().forEach(t=>t.stop());
     }
 
@@ -306,8 +308,10 @@ window.addEventListener('message',e=>{
   }
 });
 
-window.addEventListener('beforeunload',()=>{
-  if(running) postStatus('STOPPED','Camera window closed');
+window.addEventListener('beforeunload',() => {
+  if(running) {
+    postStatus('STOPPED','Camera window closed');
+  }
 });
 
 start();
