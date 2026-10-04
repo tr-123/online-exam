@@ -24,7 +24,6 @@ small{color:#9ca3af}
 
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface@0.0.7/dist/blazeface.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
 
 <script>
 const params = new URLSearchParams(location.search);
@@ -57,20 +56,15 @@ const HEAD_PITCH_THRESHOLD = 0.38;
 
 // Mouth movement is estimated from the BlazeFace mouth keypoint moving
 // relative to the eyes. It detects visible mouth motion, not speech itself.
-const MOUTH_MS = 2000;
-const REQUIRED_MOUTH_FRAMES = 6;
+const MOUTH_MS = 3000;
+const REQUIRED_MOUTH_FRAMES = 10;
 const MOUTH_RESET_FRAMES = 5;
-const MOUTH_MOVEMENT_THRESHOLD = 0.035;
+const MOUTH_MOVEMENT_THRESHOLD = 0.075;
 
-// Phone detection is deliberately throttled so COCO-SSD is not run on every
 // 250 ms face-detection cycle.
-const PHONE_SCORE_THRESHOLD = 0.55;
-const PHONE_MS = 2000;
-const REQUIRED_PHONE_FRAMES = 2;
-const PHONE_CHECK_INTERVAL_MS = 3000;
 
 let model = null;
-let phoneModel = null;
+
 let phoneLoading = false;
 let phoneBusy = false;
 let nextPhoneCheck = 0;
@@ -86,8 +80,7 @@ let multiFaceFrames = 0;
 let lookAwaySince = 0;
 let lookAwayFrames = 0;
 let lookAwayGoodFrames = 0;
-let phoneSince = 0;
-let phoneFrames = 0;
+
 let mouthSince = 0;
 let mouthFrames = 0;
 let mouthGoodFrames = 0;
@@ -150,7 +143,6 @@ async function start() {
 
     // Load the heavier phone detector after the lightweight face detector
     // is already running. It is then invoked only once every 3 seconds.
-    setTimeout(() => loadPhoneModel(), 1000);
 
     monitor();
 
@@ -213,8 +205,6 @@ async function monitor() {
           evaluateAdvancedDetections(reliableFaces[0], now);
 
           if (now >= nextPhoneCheck) {
-            nextPhoneCheck = now + PHONE_CHECK_INTERVAL_MS;
-            detectPhone(now);
           }
 
           if (faceFrames >= REQUIRED_FACE_FRAMES) status('Face detected');
@@ -337,12 +327,9 @@ function evaluateAdvancedDetections(face, now) {
   }
 }
 
-async function loadPhoneModel() {
-  if (phoneModel || phoneLoading) return;
   phoneLoading = true;
   try {
     status('Loading phone detector...');
-    phoneModel = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
     status('Camera monitoring ACTIVE');
   } catch (e) {
     console.error('Phone detector load error:', e);
@@ -351,43 +338,7 @@ async function loadPhoneModel() {
   }
 }
 
-async function detectPhone(now) {
-  if (!phoneModel) {
-    loadPhoneModel();
-    return;
-  }
 
-  if (phoneBusy) return;
-  phoneBusy = true;
-
-  try {
-    const predictions = await phoneModel.detect(video);
-    const phone = predictions.some(p =>
-      p.class === 'cell phone' && p.score >= PHONE_SCORE_THRESHOLD
-    );
-
-    if (phone) {
-      phoneFrames++;
-      if (!phoneSince) phoneSince = now;
-
-      if (
-        phoneFrames >= REQUIRED_PHONE_FRAMES &&
-        now - phoneSince >= PHONE_MS
-      ) {
-        await violation('PHONE_DETECTED');
-        phoneFrames = 0;
-        phoneSince = 0;
-      }
-    } else {
-      phoneFrames = 0;
-      phoneSince = 0;
-    }
-  } catch (e) {
-    console.error('Phone detection error:', e);
-  } finally {
-    phoneBusy = false;
-  }
-}
 
 function canRecordViolation(now) {
   violationTimestamps = violationTimestamps.filter(
