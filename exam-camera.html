@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Exam Camera Monitor</title>
+<style>body{margin:0;background:#111827;color:#fff;font-family:system-ui;text-align:center}.wrap{padding:16px}video{width:min(100%,480px);background:#000;border:3px solid #10b981;border-radius:12px;transform:scaleX(-1)}#status{margin:12px;font-weight:700}.ok{color:#34d399}.bad{color:#f87171}small{color:#9ca3af}</style></head>
+<body><div class="wrap"><h2>Exam Camera</h2><video id="video" autoplay playsinline muted></video><div id="status">Starting...</div><small>Keep your face visible and keep this window open.</small></div>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface@0.0.7/dist/blazeface.min.js"></script>
+<script>
+const params=new URLSearchParams(location.search),token=params.get('token'),backend=params.get('backend');
+const video=document.getElementById('video'),statusEl=document.getElementById('status');
+const NO_FACE_MS=2500, MULTI_FACE_MS=1500, COOLDOWN_MS=10000;
+let model=null,stream=null,running=true,noFaceSince=0,multiSince=0,lastUpload=0;
+function status(t,bad=false){statusEl.textContent=t;statusEl.className=bad?'bad':'ok'}
+function postStatus(s,msg=''){if(window.opener)window.opener.postMessage({type:'EXAM_CAMERA_STATUS',status:s,message:msg,token:token},'*')}
+async function start(){
+ if(!token||!backend){status('Invalid camera session.',true);postStatus('ERROR','Invalid camera session');return}
+ try{stream=await navigator.mediaDevices.getUserMedia({video:true,audio:false});video.srcObject=stream;await video.play();status('Loading face detector...');model=await blazeface.load();status('Camera monitoring ACTIVE');postStatus('READY');monitor()}
+ catch(e){console.error(e);status('Camera error: '+e.name,true);postStatus('ERROR',e.name+': '+e.message)}
+}
+async function monitor(){while(running){if(video.readyState>=2&&model){const faces=await model.estimateFaces(video,false);const now=Date.now();
+ if(faces.length===0){if(!noFaceSince)noFaceSince=now;multiSince=0;if(now-noFaceSince>=NO_FACE_MS){await violation('NO_FACE');noFaceSince=0}}
+ else if(faces.length>1){if(!multiSince)multiSince=now;noFaceSince=0;if(now-multiSince>=MULTI_FACE_MS){await violation('MULTIPLE_FACES');multiSince=0}}
+ else{noFaceSince=0;multiSince=0;status('Face detected')}
+ }await new Promise(r=>setTimeout(r,250))}}
+async function violation(type){const now=Date.now();if(now-lastUpload<COOLDOWN_MS)return;lastUpload=now;status('Violation detected: '+type,true);const image=capture();await upload(type,image);}
+function capture(){const c=document.createElement('canvas'),maxW=640,s=Math.min(1,maxW/video.videoWidth);c.width=Math.round(video.videoWidth*s);c.height=Math.round(video.videoHeight*s);const x=c.getContext('2d');x.drawImage(video,0,0,c.width,c.height);return c.toDataURL('image/jpeg',.72)}
+function upload(type,image){return new Promise(resolve=>{const f=document.createElement('form');f.method='POST';f.action=backend;f.target='cameraUploadTarget';const frame=document.createElement('iframe');frame.name='cameraUploadTarget';frame.style.display='none';document.body.appendChild(frame);[['token',token],['violation',type],['image',image]].forEach(([n,v])=>{const i=document.createElement('input');i.type='hidden';i.name=n;i.value=v;f.appendChild(i)});document.body.appendChild(f);f.submit();setTimeout(()=>{f.remove();frame.remove();status('Camera monitoring ACTIVE');resolve()},1200)})}
+window.addEventListener('message',e=>{if(!e.data||e.data.type!=='EXAM_COMMAND'||e.data.token!==token)return;if(e.data.command==='STOP'){running=false;if(stream)stream.getTracks().forEach(t=>t.stop());postStatus('STOPPED');window.close()}});
+window.addEventListener('beforeunload',()=>{if(running)postStatus('STOPPED','Camera window closed')});start();
+</script></body></html>
