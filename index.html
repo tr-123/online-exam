@@ -24,7 +24,6 @@ small{color:#9ca3af}
 
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface@0.0.7/dist/blazeface.min.js"></script>
-
 <script>
 const params = new URLSearchParams(location.search);
 const token = params.get('token');
@@ -36,10 +35,6 @@ const statusEl = document.getElementById('status');
 const NO_FACE_MS = 2000;
 const MULTI_FACE_MS = 2000;
 const COOLDOWN_MS = 15000;
-
-// Maximum recorded violations in any rolling 60-second window.
-const MAX_VIOLATIONS_PER_MINUTE = 5;
-const VIOLATION_WINDOW_MS = 60000;
 
 const REQUIRED_FACE_FRAMES = 5;
 const REQUIRED_NO_FACE_FRAMES = 5;
@@ -63,11 +58,11 @@ const MOUTH_MOVEMENT_THRESHOLD = 0.075;
 
 // 250 ms face-detection cycle.
 
+
+const REQUIRED_PHONE_FRAMES = 2;
+
 let model = null;
 
-let phoneLoading = false;
-let phoneBusy = false;
-let nextPhoneCheck = 0;
 let stream = null;
 let running = true;
 
@@ -81,6 +76,7 @@ let lookAwaySince = 0;
 let lookAwayFrames = 0;
 let lookAwayGoodFrames = 0;
 
+
 let mouthSince = 0;
 let mouthFrames = 0;
 let mouthGoodFrames = 0;
@@ -88,10 +84,6 @@ let mouthHistory = [];
 
 let lastUpload = 0;
 let uploading = false;
-
-// Timestamps of successfully recorded violations.
-let violationTimestamps = [];
-let violationUploadInProgress = false;
 
 function status(t, bad=false) {
   statusEl.textContent = t;
@@ -141,8 +133,8 @@ async function start() {
     status('Camera monitoring ACTIVE');
     postStatus('READY');
 
-    // Load the heavier phone detector after the lightweight face detector
     // is already running. It is then invoked only once every 3 seconds.
+    setTimeout(() => loadPhoneModel(), 1000);
 
     monitor();
 
@@ -203,9 +195,6 @@ async function monitor() {
           multiSince=0;
 
           evaluateAdvancedDetections(reliableFaces[0], now);
-
-          if (now >= nextPhoneCheck) {
-          }
 
           if (faceFrames >= REQUIRED_FACE_FRAMES) status('Face detected');
         }
@@ -327,74 +316,47 @@ function evaluateAdvancedDetections(face, now) {
   }
 }
 
-  phoneLoading = true;
-  try {
-    status('Loading phone detector...');
-    status('Camera monitoring ACTIVE');
-  } catch (e) {
-    console.error('Phone detector load error:', e);
-  } finally {
-    phoneLoading = false;
-  }
-}
 
 
 
-function canRecordViolation(now) {
+
+async function violation(type) {
+  const now = Date.now();
+  if (violationUploadInProgress) return;
+  if (now - lastUpload < COOLDOWN_MS) return;
+
   violationTimestamps = violationTimestamps.filter(
     t => now - t < VIOLATION_WINDOW_MS
   );
-  return violationTimestamps.length < MAX_VIOLATIONS_PER_MINUTE;
-}
-
-async function violation(type) {
-    const now = Date.now();
-
-    // Hard guard: only one violation upload may be active at a time.
-    if (violationUploadInProgress) return;
-
-    // Enforce a minimum gap between recorded violations.
-    if (now - lastUpload < COOLDOWN_MS) return;
-
-    // Rolling one-minute maximum.
-    violationTimestamps = violationTimestamps.filter(
-      t => now - t < VIOLATION_WINDOW_MS
-    );
-    if (violationTimestamps.length >= MAX_VIOLATIONS_PER_MINUTE) {
-      status(
-        'Violation limit reached: maximum 5 recorded violations in the last minute.',
-        true
-      );
-      return;
-    }
-
-    // Reserve the slot immediately so another detector cannot race in
-    // before this upload completes.
-    violationUploadInProgress = true;
-    lastUpload = now;
-    violationTimestamps.push(now);
-
-    status('Violation detected: ' + type, true);
-
-    try {
-      const image = capture();
-      const result = await upload(type, image);
-
-      if (result && result.ok === false) {
-        // Upload failed, so release the reserved one-minute slot.
-        violationTimestamps = violationTimestamps.filter(t => t !== now);
-        status('Upload failed: ' + (result.error || 'unknown error'), true);
-      } else {
-        status('Violation recorded: ' + type, true);
-      }
-    } catch (e) {
-      // Upload failed, so release the reserved one-minute slot.
-      violationTimestamps = violationTimestamps.filter(t => t !== now);
-      status('Upload error: ' + (e.message || e), true);
-    } finally {
-      violationUploadInProgress = false;
-    }
+  if (violationTimestamps.length >= MAX_VIOLATIONS_PER_MINUTE) {
+    status('Violation limit reached: maximum 5 recorded violations in the last minute.', true);
+    return;
   }
+
+  // Reserve the slot before the asynchronous upload starts.
+  violationUploadInProgress = true;
+  lastUpload = now;
+  violationTimestamps.push(now);
+
+  status('Violation detected: ' + type, true);
+
+  try {
+    const image = capture();
+    const result = await upload(type, image);
+
+    if (result && result.ok === false) {
+      violationTimestamps = violationTimestamps.filter(t => t !== now);
+      status('Upload failed: ' + (result.error || 'unknown error'), true);
+    } else {
+      status('Violation recorded: ' + type, true);
+    }
+  } catch (e) {
+    violationTimestamps = violationTimestamps.filter(t => t !== now);
+    status('Upload error: ' + (e.message || e), true);
+  } finally {
+    violationUploadInProgress = false;
+  }
+}
 
 function capture() {
   const c=document.createElement('canvas');
